@@ -1,0 +1,452 @@
+npm init -y
+npm install express socket.io
+
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: { origin: "*" }
+});
+
+// Servir les fichiers statiques du dossier "public"
+app.use(express.static(path.join(__dirname, 'public')));
+
+// État des joueurs en mémoire
+const players = {};
+
+io.on('connection', (socket) => {
+    console.log(`[CONNECTÉ] Joueur ${socket.id}`);
+
+    // Création de personnage
+    socket.on('createCharacter', (characterData) => {
+        players[socket.id] = {
+            id: socket.id,
+            username: characterData.username || 'Shinobi',
+            village: characterData.village,
+            stats: characterData.stats,
+            x: Math.random() * 600 + 100,
+            y: Math.random() * 400 + 100,
+            vx: 0,
+            vy: 0,
+            speed: 3 + (characterData.stats.speed * 0.2),
+            color: characterData.village === 'Konoha' ? '#ff4444' : (characterData.village === 'Suna' ? '#ffbb00' : '#00ccff')
+        };
+
+        // Confirmer la création au joueur
+        socket.emit('characterCreated', players[socket.id]);
+        
+        // Mettre à jour tous les clients
+        io.emit('updatePlayers', players);
+    });
+
+    // Déplacement vectoriel 360° (Joystick Mobile / Clavier)
+    socket.on('playerMoveVector', (vector) => {
+        const player = players[socket.id];
+        if (!player) return;
+
+        player.vx = vector.vx;
+        player.vy = vector.vy;
+    });
+
+    // Attaque / Jutsus
+    socket.on('useJutsu', (data) => {
+        const player = players[socket.id];
+        if (!player) return;
+
+        io.emit('jutsuTriggered', {
+            playerId: socket.id,
+            jutsuType: data.type,
+            x: player.x,
+            y: player.y
+        });
+    });
+
+    // Déconnexion
+    socket.on('disconnect', () => {
+        console.log(`[DÉCONNECTÉ] Joueur ${socket.id}`);
+        delete players[socket.id];
+        io.emit('updatePlayers', players);
+    });
+});
+
+// Boucle de mise à jour physique du serveur (60 FPS)
+setInterval(() => {
+    for (let id in players) {
+        const p = players[id];
+        p.x += p.vx * p.speed;
+        p.y += p.vy * p.speed;
+
+        // Limites de la carte
+        p.x = Math.max(20, Math.min(1200, p.x));
+        p.y = Math.max(20, Math.min(800, p.y));
+    }
+    io.emit('updatePositions', players);
+}, 1000 / 60);
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Serveur démarré sur http://localhost:${PORT}`);
+});
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Ninja Arena MMORPG</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --bg: #0f111a;
+            --card-bg: #1a1d2e;
+            --orange: #ff9900;
+            --blue: #00ccff;
+            --border: #2e344e;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: #fff;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* --- ÉCRAN DE CRÉATION DE PERSONNAGE --- */
+        #creation-screen {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: rgba(15, 17, 26, 0.95);
+            z-index: 2000;
+            padding: 15px;
+        }
+
+        .creator-box {
+            display: grid;
+            grid-template-columns: 1fr 280px;
+            gap: 20px;
+            width: 100%;
+            max-width: 850px;
+            background: var(--card-bg);
+            border: 2px solid var(--border);
+            border-radius: 12px;
+            padding: 25px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        h2 { color: var(--orange); margin-bottom: 15px; text-transform: uppercase; }
+
+        .input-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 15px; }
+        label { font-size: 13px; color: #a0a5c0; font-weight: bold; }
+        input[type="text"] {
+            background: #11131f; border: 1px solid var(--border);
+            padding: 10px; border-radius: 6px; color: #fff; outline: none;
+        }
+
+        .village-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .v-btn {
+            background: #11131f; border: 2px solid var(--border);
+            padding: 10px; border-radius: 6px; color: #fff; cursor: pointer; text-align: center;
+        }
+        .v-btn.active { border-color: var(--orange); color: var(--orange); background: rgba(255,153,0,0.1); }
+
+        .stat-row { display: flex; justify-content: space-between; align-items: center; background: #11131f; padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; }
+        .stat-btn { width: 26px; height: 26px; background: var(--border); border: none; color: #fff; border-radius: 4px; cursor: pointer; }
+
+        .btn-submit {
+            width: 100%; background: var(--orange); color: #000; border: none;
+            padding: 12px; font-weight: bold; border-radius: 6px; cursor: pointer; margin-top: 10px;
+        }
+
+        /* --- CANVAS JEU --- */
+        #gameCanvas {
+            display: block; width: 100vw; height: 100vh; background: #1e2333;
+        }
+
+        /* --- JOYSTICK FLOTTANT MOBILE --- */
+        #joystick-zone {
+            position: fixed; top: 0; left: 0; width: 50vw; height: 100vh; z-index: 1000; touch-action: none;
+        }
+        #joystick-base {
+            position: absolute; width: 110px; height: 110px; margin: -55px 0 0 -55px;
+            border-radius: 50%; background: rgba(255, 255, 255, 0.15); border: 2px solid rgba(255, 255, 255, 0.3);
+            backdrop-filter: blur(4px); display: none; pointer-events: none;
+        }
+        #joystick-stick {
+            position: absolute; top: 50%; left: 50%; width: 46px; height: 46px; margin: -23px 0 0 -23px;
+            border-radius: 50%; background: var(--orange); pointer-events: none;
+        }
+
+        /* --- BOUTONS D'ACTION TACTILES --- */
+        #touch-actions {
+            position: fixed; bottom: 20px; right: 20px;
+            display: grid; grid-template-columns: repeat(2, 60px); gap: 12px;
+            z-index: 1000; pointer-events: auto;
+        }
+        .action-btn {
+            width: 60px; height: 60px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.4);
+            background: rgba(0,0,0,0.5); color: #fff; font-weight: bold; font-size: 18px;
+            display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px);
+        }
+        .action-btn:active { transform: scale(0.9); }
+        .atk-btn { background: rgba(255, 68, 68, 0.6); border-color: #ff4444; }
+
+        @media (max-width: 768px) {
+            .creator-box { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- CRÉATION DE PERSONNAGE -->
+    <div id="creation-screen">
+        <div class="creator-box">
+            <div>
+                <h2>Créer un Ninja</h2>
+                <div class="input-group">
+                    <label>Nom du Shinobi</label>
+                    <input type="text" id="username" placeholder="Ex: Naruto" maxlength="12">
+                </div>
+                <div class="input-group">
+                    <label>Village d'origine</label>
+                    <div class="village-options">
+                        <div class="v-btn active" data-v="Konoha">🔥 Konoha</div>
+                        <div class="v-btn" data-v="Suna">⏳ Suna</div>
+                        <div class="v-btn" data-v="Kiri">🌊 Kiri</div>
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label>Points d'attributs (Restants: <span id="pts">10</span>)</label>
+                    <div class="stat-row">
+                        <span>⚔️ Attaque</span>
+                        <div>
+                            <button class="stat-btn" onclick="addStat('atk', -1)">-</button>
+                            <span id="v-atk">5</span>
+                            <button class="stat-btn" onclick="addStat('atk', 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="stat-row">
+                        <span>⚡ Vitesse</span>
+                        <div>
+                            <button class="stat-btn" onclick="addStat('speed', -1)">-</button>
+                            <span id="v-speed">5</span>
+                            <button class="stat-btn" onclick="addStat('speed', 1)">+</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div style="display: flex; flex-direction: column; justify-content: flex-end;">
+                <button class="btn-submit" onclick="confirmCharacter()">ENTRER DANS L'ARÈNE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CANVAS DU JEU -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- JOYSTICK MOBILE -->
+    <div id="joystick-zone">
+        <div id="joystick-base">
+            <div id="joystick-stick"></div>
+        </div>
+    </div>
+
+    <!-- BOUTONS D'ACTIONS MOBILE -->
+    <div id="touch-actions">
+        <button class="action-btn atk-btn" id="btn-atk">⚔️</button>
+        <button class="action-btn" id="btn-j1">J1</button>
+    </div>
+
+    <script>
+        const socket = io();
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- DONNÉES DU PERSONNAGE ---
+        let pts = 10;
+        let stats = { atk: 5, speed: 5 };
+        let village = 'Konoha';
+
+        document.querySelectorAll('.v-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.v-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                village = btn.dataset.v;
+            });
+        });
+
+        function addStat(type, val) {
+            if (val > 0 && pts > 0) { stats[type]++; pts--; }
+            else if (val < 0 && stats[type] > 5) { stats[type]--; pts++; }
+            document.getElementById(`v-${type}`).innerText = stats[type];
+            document.getElementById('pts').innerText = pts;
+        }
+
+        function confirmCharacter() {
+            const username = document.getElementById('username').value.trim() || 'Shinobi';
+            socket.emit('createCharacter', { username, village, stats });
+        }
+
+        socket.on('characterCreated', () => {
+            document.getElementById('creation-screen').style.display = 'none';
+        });
+
+        // --- JOYSTICK TACTILE FLOTTANT ---
+        class Joystick {
+            constructor() {
+                this.zone = document.getElementById('joystick-zone');
+                this.base = document.getElementById('joystick-base');
+                this.stick = document.getElementById('joystick-stick');
+                this.touchId = null;
+                this.origin = { x: 0, y: 0 };
+                this.maxR = 45;
+
+                this.zone.addEventListener('touchstart', (e) => this.start(e), { passive: false });
+                this.zone.addEventListener('touchmove', (e) => this.move(e), { passive: false });
+                this.zone.addEventListener('touchend', (e) => this.end(e), { passive: false });
+            }
+
+            start(e) {
+                e.preventDefault();
+                if (this.touchId !== null) return;
+                const t = e.changedTouches[0];
+                this.touchId = t.identifier;
+                this.origin = { x: t.clientX, y: t.clientY };
+                this.base.style.left = `${this.origin.x}px`;
+                this.base.style.top = `${this.origin.y}px`;
+                this.base.style.display = 'block';
+            }
+
+            move(e) {
+                e.preventDefault();
+                const t = Array.from(e.touches).find(t => t.identifier === this.touchId);
+                if (!t) return;
+
+                const dx = t.clientX - this.origin.x;
+                const dy = t.clientY - this.origin.y;
+                const dist = Math.hypot(dx, dy);
+                const angle = Math.atan2(dy, dx);
+                const clamped = Math.min(dist, this.maxR);
+
+                const sx = Math.cos(angle) * clamped;
+                const sy = Math.sin(angle) * clamped;
+
+                this.stick.style.transform = `translate(${sx}px, ${sy}px)`;
+                socket.emit('playerMoveVector', { vx: sx / this.maxR, vy: sy / this.maxR });
+            }
+
+            end(e) {
+                e.preventDefault();
+                this.touchId = null;
+                this.base.style.display = 'none';
+                this.stick.style.transform = `translate(0px, 0px)`;
+                socket.emit('playerMoveVector', { vx: 0, vy: 0 });
+            }
+        }
+        new Joystick();
+
+        // CONTRÔLES CLAVIER (Pour joueurs PC)
+        const keys = { z: false, s: false, q: false, d: false };
+        window.addEventListener('keydown', (e) => updateKey(e.key.toLowerCase(), true));
+        window.addEventListener('keyup', (e) => updateKey(e.key.toLowerCase(), false));
+
+        function updateKey(key, state) {
+            if (['z','w','arrowup'].includes(key)) keys.z = state;
+            if (['s','arrowdown'].includes(key)) keys.s = state;
+            if (['q','a','arrowleft'].includes(key)) keys.q = state;
+            if (['d','arrowright'].includes(key)) keys.d = state;
+
+            let vx = 0, vy = 0;
+            if (keys.z) vy -= 1;
+            if (keys.s) vy += 1;
+            if (keys.q) vx -= 1;
+            if (keys.d) vx += 1;
+
+            socket.emit('playerMoveVector', { vx, vy });
+        }
+
+        // BOUTONS D'ATTAQUE
+        document.getElementById('btn-atk').addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            socket.emit('useJutsu', { type: 'Attaque' });
+        });
+
+        // --- RENDU CANVAS EN TEMPS RÉEL ---
+        let allPlayers = {};
+        let effects = [];
+
+        socket.on('updatePositions', (players) => { allPlayers = players; });
+        socket.on('updatePlayers', (players) => { allPlayers = players; });
+
+        socket.on('jutsuTriggered', (data) => {
+            effects.push({ x: data.x, y: data.y, r: 10, alpha: 1 });
+        });
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Dessiner les effets / attaques
+            effects.forEach((eff, i) => {
+                ctx.beginPath();
+                ctx.arc(eff.x, eff.y, eff.r, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(255, 153, 0, ${eff.alpha})`;
+                ctx.lineWidth = 3;
+                ctx.stroke();
+                eff.r += 2;
+                eff.alpha -= 0.05;
+                if (eff.alpha <= 0) effects.splice(i, 1);
+            });
+
+            // Dessiner tous les joueurs
+            for (let id in allPlayers) {
+                const p = allPlayers[id];
+
+                // Corps du joueur
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 20, 0, Math.PI * 2);
+                ctx.fillStyle = p.color;
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+
+                // Nom du joueur
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(p.username, p.x, p.y - 28);
+            }
+
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>
+
+node server.js
